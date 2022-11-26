@@ -12,7 +12,7 @@ class ImemPortIo extends Bundle {
 
 class Memory extends Module {
   val io = IO(new Bundle {
-    val imem = new ImemPortIo()
+    val imem = new ImemPortIo
   })
 
   val mem = Mem(16384, UInt(8.W))
