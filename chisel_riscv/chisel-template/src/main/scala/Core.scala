@@ -34,23 +34,60 @@ class Core extends Module {
   val imm_i_sext = Cat(Fill(20, imm_i(11)), imm_i)
   val imm_s = Cat(inst(31, 25), inst(11, 7))
   val imm_s_sext = Cat(Fill(20, imm_s(11)), imm_s)
-  
+
+  val csignals = ListLookup(
+    inst,
+    List(ALU_X, OP1_RS1, OP2_RS2, MEM_X, REN_X, WB_X),
+    Array(
+      LW -> List(ALU_ADD, OP1_RS1, OP2_IMI, MEM_X, REN_S, WB_MEM),
+      SW -> List(ALU_ADD, OP1_RS1, OP2_IMS, MEM_S, REN_X, WB_X),
+      ADD -> List(ALU_ADD, OP1_RS1, OP2_RS2, MEM_X, REN_S, WB_ALU),
+      ADDI -> List(ALU_ADD, OP1_RS1, OP2_IMI, MEM_X, REN_S, WB_ALU),
+      SUB -> List(ALU_SUB, OP1_RS1, OP2_RS2, MEM_X, REN_S, WB_ALU),
+      AND -> List(ALU_AND, OP1_RS1, OP2_RS2, MEM_X, REN_S, WB_ALU),
+      OR -> List(ALU_OR, OP1_RS1, OP2_RS2, MEM_X, REN_S, WB_ALU),
+      XOR -> List(ALU_XOR, OP1_RS1, OP2_RS2, MEM_X, REN_S, WB_ALU),
+      ANDI -> List(ALU_AND, OP1_RS1, OP2_IMI, MEM_X, REN_S, WB_ALU),
+      ORI -> List(ALU_OR, OP1_RS1, OP2_IMI, MEM_X, REN_S, WB_ALU),
+      XORI -> List(ALU_XOR, OP1_RS1, OP2_IMI, MEM_X, REN_S, WB_ALU)
+    )
+  )
+  val exe_fun :: op1_sel :: op2_sel :: mem_wen :: rfwen :: wb_sel :: Nil =
+    csignals
+  val op1_data =
+    MuxCase(0.U(WORD_LEN.W), Seq((op1_sel === OP1_RS1) -> rs1_data))
+  val op2_data =
+    MuxCase(
+      0,
+      U(WORD_LEN.W),
+      Seq(
+        (op2_sel == OP2_RS2) -> rs2_data,
+        (op2_sel === OP2_IMI) -> imm_i_sext,
+        (op2_sel === OP2_IMS) -> imm_s_sext
+      )
+    )
+
   // EX
-  val alu_out = MuxCase(0.U(WORD_LEN.W), Seq(
-    (inst === LW) -> (rs1_data + imm_i_sext),
-    (inst === SW) -> (rs1_data + imm_s_sext),
-    (inst === ADD) -> (rs1_data + rs2_data),
-    (inst === SUB) -> (rs1_data - rs2_data)
-  ))
+  val alu_out = MuxCase(
+    0.U(WORD_LEN.W),
+    Seq(
+      (exe_fun === ALU_ADD) -> (op1_data + op2_data),
+      (exe_fun === ALU_SUB) -> (op1_data - op2_data),
+      (exe_fun === ALU_AND) -> (op1_data & op2_data),
+      (exe_fun === ALU_OR) -> (op1_data | op2_data),
+      (exe_fun === ALU_XOR) -> (op1_data ^ op2_data),
+    )
+  )
 
   // MEM
   io.dmem.addr := alu_out
-  io.dmem.wen := (inst === SW)
+  io.dmem.wen := mem_wen
   io.dmem.wdata := rs2_data
 
   // WB
-  val wb_data = io.dmem.rdata
-  when(inst === LW || inst === ADD || inst === ADDI || inst === SUB) {
+  val wb_data = MuxCase(alu_out, Seq(wb_sel === WB_MEM -> io.dmem.rdata))
+
+  when(rf_wen === REN_S) {
     regfile(wb_addr) := wb_data
   }
 
