@@ -26,7 +26,14 @@ class Core extends Module {
   val alu_out = Wire(UInt(WORD_LEN.W))
   val br_target = Wire(UInt(WORD_LEN.W))
 
-  val pc_next = MuxCase(pc_plus4, Seq(br_flg -> br_target, jmp_flg -> alu_out))
+  val pc_next = MuxCase(
+    pc_plus4,
+    Seq(
+      br_flg -> br_target,
+      jmp_flg -> alu_out,
+      (inst === ECALL) -> csr_regfile(0x305)
+    )
+  )
   pc_reg := pc_next
 
   // ID
@@ -91,7 +98,8 @@ class Core extends Module {
       CSRRS -> List(ALU_COPY1, OP1_RS1, OP2_X, MEN_X, REN_S, WB_CSR, CSR_S),
       CSRRSI -> List(ALU_COPY1, OP1_IMZ, OP2_X, MEN_X, REN_S, WB_CSR, CSR_S),
       CSRRC -> List(ALU_COPY1, OP1_RS1, OP2_X, MEN_X, REN_S, WB_CSR, CSR_C),
-      CSRRCI -> List(ALU_COPY1, OP1_IMZ, OP2_X, MEN_X, REN_S, WB_CSR, CSR_C)
+      CSRRCI -> List(ALU_COPY1, OP1_IMZ, OP2_X, MEN_X, REN_S, WB_CSR, CSR_C),
+      ECALL -> List(ALU_X, OP1_X, OP2_X, MEN_X, REN_X, WB_X, CSR_E)
     )
   )
   val exe_fun :: op1_sel :: op2_sel :: mem_wen :: rfwen :: wb_sel :: csr_cmd :: Nil =
@@ -156,7 +164,7 @@ class Core extends Module {
 
   // CSR
   val csr_regfile = Mem(4096, UInt(WORD_LEN.W))
-  val csr_addr = inst(31, 20)
+  val csr_addr = Mux(csr_cmd === CSR_E, 0x342.U(CSR_ADDR_LEN.W), inst(31, 20))
 
   val csr_rdata = csr_regfile(csr_addr)
 
@@ -165,7 +173,8 @@ class Core extends Module {
     Seq(
       (csr_cmd === CSR_W) -> op1_data,
       (csr_cmd === CSR_S) -> (csr_rdata | op1_data),
-      (csr_cmd === CSR_C) -> (csr_rdata & ~op1_data)
+      (csr_cmd === CSR_C) -> (csr_rdata & ~op1_data),
+      (csr_cmd === CSR_E) -> 11.U(WORD_LEN.W)
     )
   )
 
