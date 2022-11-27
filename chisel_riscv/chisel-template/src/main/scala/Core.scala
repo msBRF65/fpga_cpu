@@ -19,7 +19,13 @@ class Core extends Module {
   val pc_reg = RegInit(START_ADDR)
   io.imem.addr := pc_reg
   val inst = io.imem.inst
-  pc_reg := pc_reg + 4.U(WORD_LEN.W)
+
+  val pc_plus4 = pc_reg + 4.U(WORD_LEN.W)
+  val br_flg = Wire(Bool())
+  val br_target = Wire(UInt(WORD_LEN.W))
+
+  val pc_next = MuxCase(pc_plus4, Seq(br_flg -> br_target))
+  pc_reg := pc_next
 
   // ID
   val rs1_addr = inst(19, 15)
@@ -34,6 +40,8 @@ class Core extends Module {
   val imm_i_sext = Cat(Fill(20, imm_i(11)), imm_i)
   val imm_s = Cat(inst(31, 25), inst(11, 7))
   val imm_s_sext = Cat(Fill(20, imm_s(11)), imm_s)
+  val imm_b = Cat(inst(31), inst(7), inst(30, 25), inst(11, 8))
+  val imm_b_sext = Cat(Fill(19, imm_b(11)), imm_b, 0.U(1.U))
 
   val csignals = ListLookup(
     inst,
@@ -59,7 +67,13 @@ class Core extends Module {
       SLT -> List(ALU_SLT, OP1_RS1, OP2_RS2, MEN_X, REN_S, WB_ALU, CSR_X),
       SLTU -> List(ALU_SLTU, OP1_RS1, OP2_RS2, MEN_X, REN_S, WB_ALU, CSR_X),
       SLTI -> List(ALU_SLT, OP1_RS1, OP2_IMI, MEN_X, REN_S, WB_ALU, CSR_X),
-      SLTIU -> List(ALU_SLTU, OP1_RS1, OP2_IMI, MEN_X, REN_S, WB_ALU, CSR_X)
+      SLTIU -> List(ALU_SLTU, OP1_RS1, OP2_IMI, MEN_X, REN_S, WB_ALU, CSR_X),
+      BEQ -> List(BR_BEQ, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      BNE -> List(BR_BNE, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      BGE -> List(BR_BGE, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      BGEU -> List(BR_BGEU, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      BLT -> List(BR_BLT, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      BLTU -> List(BR_BLTU, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X)
     )
   )
   val exe_fun :: op1_sel :: op2_sel :: mem_wen :: rfwen :: wb_sel :: Nil =
@@ -93,6 +107,19 @@ class Core extends Module {
       (exe_fun === ALU_SLTU) -> (op1_data < op2_data).asUInt()
     )
   )
+  // branch
+  br_flg := MuxCase(
+    false.B,
+    Seq(
+      (exe_fun === BR_BEQ) -> (op1_data === op2_data),
+      (exe_fun === BR_BNE) -> !(op1_data === op2_data),
+      (exe_fun === BR_BLT) -> (op1_data.asSInt() < op2_data.asSInt()),
+      (exe_fun === BR_BGE) -> !(op1_data.asSInt() < op2_data.asSInt()),
+      (exe_fun === BR_BLTU) -> (op1_data < op2_data),
+      (exe_fun === BR_BGEU) -> !(op1_data < op2_data)
+    )
+  )
+  br_target := pc_reg + imm_b_sext
 
   // MEM
   io.dmem.addr := alu_out
