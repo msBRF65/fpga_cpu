@@ -22,9 +22,11 @@ class Core extends Module {
 
   val pc_plus4 = pc_reg + 4.U(WORD_LEN.W)
   val br_flg = Wire(Bool())
+  val jmp_flg = Wire(inst === JAL || inst === JALR)
+  val alu_out = Wire(UInt(WORD_LEN.W))
   val br_target = Wire(UInt(WORD_LEN.W))
 
-  val pc_next = MuxCase(pc_plus4, Seq(br_flg -> br_target))
+  val pc_next = MuxCase(pc_plus4, Seq(br_flg -> br_target, jmp_flg -> alu_out))
   pc_reg := pc_next
 
   // ID
@@ -42,6 +44,10 @@ class Core extends Module {
   val imm_s_sext = Cat(Fill(20, imm_s(11)), imm_s)
   val imm_b = Cat(inst(31), inst(7), inst(30, 25), inst(11, 8))
   val imm_b_sext = Cat(Fill(19, imm_b(11)), imm_b, 0.U(1.U))
+  val imm_j = Cat(inst(31), inst(19, 12), inst(20), inst(30, 21))
+  val imm_j_sext = Cat(Fill(11, imm_j(19)), imm_j, 0.U(1.U))
+  val imm_u = inst(31, 12)
+  val imm_u_shifted = Cat(imm_u, Fill(12, 0.U))
 
   val csignals = ListLookup(
     inst,
@@ -73,13 +79,23 @@ class Core extends Module {
       BGE -> List(BR_BGE, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
       BGEU -> List(BR_BGEU, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
       BLT -> List(BR_BLT, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
-      BLTU -> List(BR_BLTU, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X)
+      BLTU -> List(BR_BLTU, OP1_RS1, OP2_RS2, MEN_X, REN_X, WB_X, CSR_X),
+      JAL -> List(ALU_ADD, OP1_PC, OP2_IMJ, MEN_X, REN_S, WB_PC, CSR_X),
+      JALR -> List(ALU_JALR, OP1_RS1, OP2_IMI, MEN_X, REN_S, WB_PC, CSR_X),
+      LUI -> List(ALU_ADD, OP1_X, OP2_IMU, MEN_X, REN_S, WB_ALU, CSR_X),
+      AUIPC -> List(ALU_ADD, OP1_PC, OP2_IMU, MEN_X, REN_S, WB_ALU, CSR_X)
     )
   )
   val exe_fun :: op1_sel :: op2_sel :: mem_wen :: rfwen :: wb_sel :: Nil =
     csignals
   val op1_data =
-    MuxCase(0.U(WORD_LEN.W), Seq((op1_sel === OP1_RS1) -> rs1_data))
+    MuxCase(
+      0.U(WORD_LEN.W),
+      Seq(
+        (op1_sel === OP1_RS1) -> rs1_data,
+        (op1_sel === OP1_PC) -> pc_reg
+      )
+    )
   val op2_data =
     MuxCase(
       0,
@@ -87,12 +103,14 @@ class Core extends Module {
       Seq(
         (op2_sel == OP2_RS2) -> rs2_data,
         (op2_sel === OP2_IMI) -> imm_i_sext,
-        (op2_sel === OP2_IMS) -> imm_s_sext
+        (op2_sel === OP2_IMS) -> imm_s_sext,
+        (op2_sel === OP2_IMJ) -> imm_j_sext,
+        (op2_sel === OP2_IMU) -> imm_u_shifted
       )
     )
 
   // EX
-  val alu_out = MuxCase(
+  alu_out = MuxCase(
     0.U(WORD_LEN.W),
     Seq(
       (exe_fun === ALU_ADD) -> (op1_data + op2_data),
@@ -104,7 +122,8 @@ class Core extends Module {
       (exe_fun === ALU_SRL) -> (op1_data >> op2_data(4, 0)).asUInt(),
       (exe_fun === ALU_SLA) -> (op1_data.asSInt() >> op2_data(4, 0)).asUInt(),
       (exe_fun === ALU_SLT) -> (op1_data.asSInt() < op2_data.asSInt()).asUInt(),
-      (exe_fun === ALU_SLTU) -> (op1_data < op2_data).asUInt()
+      (exe_fun === ALU_SLTU) -> (op1_data < op2_data).asUInt(),
+      (exe_fun === ALU_JALR) -> ((op1_data + op2_data) & ~1.U(WORD_LEN.W))
     )
   )
   // branch
@@ -127,10 +146,16 @@ class Core extends Module {
   io.dmem.wdata := rs2_data
 
   // WB
-  val wb_data = MuxCase(alu_out, Seq(wb_sel === WB_MEM -> io.dmem.rdata))
+  val wb_data = MuxCase(
+    alu_out,
+    Seq(
+      (wb_sel === WB_MEM) -> io.dmem.rdata,
+      (wb_sel === WB_PC) -> pc_plus4
+    )
+  )
 
   when(rf_wen === REN_S) {
-    regfile(wb_addr) := wb_data
+    regfile(wb_addr) := wb_data // jump命令の時はwb_addrがreturn_addressに設定される
   }
 
   io.exit := (inst === 0x00602823.U(WORD_LEN.W))
