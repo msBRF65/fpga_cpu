@@ -6,12 +6,14 @@ import common.Instructions._
 import common.Consts._
 
 class Core extends Module {
-  val io = IO(new Bundle {
-    val imem = Flipped(new ImemPortIo())
-    val dmem = Flipped(new DmemPortIo())
-    val gp = Output(UInt(WORD_LEN.W))
-    val exit = Output(Bool())
-  })
+  val io = IO(
+    new Bundle {
+      val imem = Flipped(new ImemPortIo())
+      val dmem = Flipped(new DmemPortIo())
+      val gp = Output(UInt(WORD_LEN.W))
+      val exit = Output(Bool())
+    }
+  )
 
   val regfile = Mem(32, UInt(WORD_LEN.W))
   val csr_regfile = Mem(4096, UInt(WORD_LEN.W))
@@ -66,6 +68,7 @@ class Core extends Module {
   io.imem.addr := if_reg_pc
   val if_inst = io.imem.inst
 
+  val stall_flg = Wire(Bool())
   val exe_br_flg = Wire(Bool())
   val exe_br_target = Wire(UInt(WORD_LEN.W))
   val exe_jmp_flg = Wire(Bool())
@@ -75,33 +78,66 @@ class Core extends Module {
   val if_pc_next = MuxCase(
     if_pc_plus4,
     Seq(
+      // 優先順位重要！ジャンプ成立とストールが同時発生した場合、ジャンプ処理を優先
       exe_br_flg -> exe_br_target,
       exe_jmp_flg -> exe_alu_out,
-      (if_inst === ECALL) -> csr_regfile(0x305) // go to trap_vector
+      (if_inst === ECALL) -> csr_regfile(0x305), // go to trap_vector
+      stall_flg -> if_reg_pc // stall
     )
   )
   if_reg_pc := if_pc_next
 
   // **********************************
   // IF/ID Register
-  id_reg_pc := if_reg_pc
-  id_reg_inst := Mux((exe_br_flg || exe_jmp_flg), BUBBLE, if_inst)
+  id_reg_pc := Mux(stall_flg, id_reg_pc, if_reg_pc)
+  id_reg_inst := MuxCase(
+    if_inst,
+    Seq(
+      // 優先順位重要！ジャンプ成立とストールが同時発生した場合、ジャンプ処理を優先
+      (exe_br_flg || exe_jmp_flg) -> BUBBLE,
+      stall_flg -> id_reg_inst
+    )
+  )
 
   // **********************************
   // Instruction Decode (ID) Stage
 
-  // branch,jump時にIDをBUBBLE化
-  val id_inst = Mux((exe_br_flg || exe_jmp_flg), BUBBLE, id_reg_inst)
+  // stall_flg検出用にアドレスのみ一旦デコード
+  val id_rs1_addr_b = id_reg_inst(19, 15)
+  val id_rs2_addr_b = id_reg_inst(24, 20)
+
+  // EXとのデータハザード→stall
+  val id_rs1_data_hazard =
+    (exe_reg_rf_wen === REN_S) && (id_rs1_addr_b =/= 0.U) && (id_rs1_addr_b === exe_reg_wb_addr)
+  val id_rs2_data_hazard =
+    (exe_reg_rf_wen === REN_S) && (id_rs2_addr_b =/= 0.U) && (id_rs2_addr_b === exe_reg_wb_addr)
+  stall_flg := (id_rs1_data_hazard || id_rs2_data_hazard)
+
+  // branch,jump,stall時にIDをBUBBLE化
+  val id_inst =
+    Mux((exe_br_flg || exe_jmp_flg || stall_flg), BUBBLE, id_reg_inst)
 
   val id_rs1_addr = id_inst(19, 15)
   val id_rs2_addr = id_inst(24, 20)
   val id_wb_addr = id_inst(11, 7)
 
   val mem_wb_data = Wire(UInt(WORD_LEN.W))
-  val id_rs1_data =
-    Mux((id_rs1_addr =/= 0.U), regfile(id_rs1_addr), 0.U(WORD_LEN.W))
-  val id_rs2_data =
-    Mux((id_rs2_addr =/= 0.U), regfile(id_rs2_addr), 0.U(WORD_LEN.W))
+  val id_rs1_data = MuxCase(
+    regfile(id_rs1_addr),
+    Seq(
+      (id_rs1_addr === 0.U) -> 0.U(WORD_LEN.W),
+      ((id_rs1_addr === mem_reg_wb_addr) && (mem_reg_rf_wen === REN_S)) -> mem_wb_data, // MEMからフォワーディング
+      ((id_rs1_addr === wb_reg_wb_addr) && (wb_reg_rf_wen === REN_S)) -> wb_reg_wb_data // WBからフォワーディング
+    )
+  )
+  val id_rs2_data = MuxCase(
+    regfile(id_rs2_addr),
+    Seq(
+      (id_rs2_addr === 0.U) -> 0.U(WORD_LEN.W),
+      ((id_rs2_addr === mem_reg_wb_addr) && (mem_reg_rf_wen === REN_S)) -> mem_wb_data, // MEMからフォワーディング
+      ((id_rs2_addr === wb_reg_wb_addr) && (wb_reg_rf_wen === REN_S)) -> wb_reg_wb_data // WBからフォワーディング
+    )
+  )
 
   val id_imm_i = id_inst(31, 20)
   val id_imm_i_sext = Cat(Fill(20, id_imm_i(11)), id_imm_i)
@@ -210,10 +246,7 @@ class Core extends Module {
   exe_alu_out := MuxCase(
     0.U(WORD_LEN.W),
     Seq(
-      (exe_reg_exe_fun === ALU_ADD) -> (exe_reg_op1_data + exe_reg_op2_data)(
-        31,
-        0
-      ), // オーバーフロー切り捨て
+      (exe_reg_exe_fun === ALU_ADD) -> (exe_reg_op1_data + exe_reg_op2_data),
       (exe_reg_exe_fun === ALU_SUB) -> (exe_reg_op1_data - exe_reg_op2_data),
       (exe_reg_exe_fun === ALU_AND) -> (exe_reg_op1_data & exe_reg_op2_data),
       (exe_reg_exe_fun === ALU_OR) -> (exe_reg_op1_data | exe_reg_op2_data),
@@ -319,10 +352,12 @@ class Core extends Module {
   // **********************************
   // IO & Debug
   io.gp := regfile(3)
-  io.exit := (id_reg_inst === UNIMP)
+  // io.exit := (mem_reg_pc === 0x44.U(WORD_LEN.W))
+  io.exit := (mem_reg_pc === 0x44.U(WORD_LEN.W))
   printf(p"if_reg_pc        : 0x${Hexadecimal(if_reg_pc)}\n")
   printf(p"id_reg_pc        : 0x${Hexadecimal(id_reg_pc)}\n")
   printf(p"id_reg_inst      : 0x${Hexadecimal(id_reg_inst)}\n")
+  printf(p"stall_flg        : 0x${Hexadecimal(stall_flg)}\n")
   printf(p"id_inst          : 0x${Hexadecimal(id_inst)}\n")
   printf(p"id_rs1_data      : 0x${Hexadecimal(id_rs1_data)}\n")
   printf(p"id_rs2_data      : 0x${Hexadecimal(id_rs2_data)}\n")
