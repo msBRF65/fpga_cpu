@@ -1,0 +1,5 @@
+.metals
+!.gitignore
+.vscode
+.idea
+chisel-template/results/
